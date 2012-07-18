@@ -2,7 +2,13 @@ require 'tempfile'
 
 module ActiveWarehouse #:nodoc
   module Aggregate #:nodoc
-    
+
+    class Reader < ActiveRecord::Base
+    end
+
+    class Writer < ActiveRecord::Base
+    end
+
     # A Pipelined implementation of a ROLAP engine that stores all possible
     # combinations
     # of fact and dimensional values for a specific cube.
@@ -18,13 +24,13 @@ module ActiveWarehouse #:nodoc
       include RolapCommon
       
       attr_accessor :new_records_only, :new_records_dimension, :new_records_offset, :new_records_record
-      
+
       def sanitize(value)
         result = value
         if value.is_a?(Date) || value.is_a?(DateTime) || value.is_a?(Time)
           result = value.to_s(:db)
         end
-        connection.quote(result)
+        read_connection.quote(result)
       end
       
       def query(*args)
@@ -176,7 +182,7 @@ module ActiveWarehouse #:nodoc
           # execute the query and return the results as a CubeQueryResult object
           # puts "\n\n aggregate_fields: #{aggregate_fields.inspect}\n\n"
           result = ActiveWarehouse::CubeQueryResult.new(aggregate_fields)
-          rows = connection.select_all(sql)
+          rows = read_connection.select_all(sql)
           rows.each do |row|
             # puts "\n\n result row: #{row.inspect}\n\n"
             result.add_data(row.delete(current_row_name.to_s),
@@ -187,11 +193,37 @@ module ActiveWarehouse #:nodoc
         end
       end
 
+      @read_connection_label = nil
+      @write_connection_label = nil
+
+      def read_connection
+        @read_connection_label ? Reader.connection : self.connection
+      end
+
+      def read_connection=(connection_label)
+        @read_connection_label = connection_label
+        Reader.establish_connection(@read_connection_label) if @read_connection_label
+      end
+
+      def write_connection
+        @write_connection_label ? Writer.connection : self.connection
+      end
+
+      def write_connection=(connection_label)
+        @write_connection_label = connection_label
+        Writer.establish_connection(@write_connection_label) if @write_connection_label
+      end
+
       # Build and populate the data store
       def populate(options={})
         # puts "PipelinedRolapAggregate::populate #{options.inspect}"
         @new_records_record = nil
-        
+
+        # we need 2 connections
+        # one to read, one to write
+        self.read_connection = options[:read_connection] if options[:read_connection]
+        self.write_connection = options[:write_connection] if options[:write_connection]
+
         # see if the options mean to do new records only
         if(options[:new_records_only])
           # need to know the name of the dimension and field to use to find new only
@@ -253,17 +285,17 @@ module ActiveWarehouse #:nodoc
         table_options = options[:aggregate_table_options] || {}
         
         # # truncate if configured to, otherwise, just pile it on.
-        if (options[:truncate] && connection.tables.include?(table_name))
-          connection.drop_table(table_name)
+        if (options[:truncate] && write_connection.tables.include?(table_name))
+          write_connection.drop_table(table_name)
         end
         
         unique_index_columns = []
         index_columns = []
         
-        if !connection.tables.include?(table_name)
+        if !write_connection.tables.include?(table_name)
           aggregate_table_options = (options[:aggregate_table_options] || {}).merge({:id => false})
           # puts "create_table: #{table_name}"
-          connection.create_table(table_name, aggregate_table_options) do |t|
+          write_connection.create_table(table_name, aggregate_table_options) do |t|
             dimension_fields.each_with_index do |pair, i|
               dim = pair.first
               levels = pair.last
@@ -311,13 +343,13 @@ module ActiveWarehouse #:nodoc
           # add index per dimension here (not for aggregate fields)
           index_columns.each{ |dimension_column|
             # puts "making index for: #{table_name} on: #{dimension_column}"
-            connection.add_index(table_name, dimension_column, :name => "by_#{dimension_column}")
+            write_connection.add_index(table_name, dimension_column, :name => "by_#{dimension_column}")
           }
           
           # Add a unique index for the 
           unless unique_index_columns.empty?
             # puts "making unique index for: #{table_name} on: #{unique_index_columns.inspect}"
-            connection.add_index(table_name, unique_index_columns, :unique => true, :name => "by_unique_dims") 
+            write_connection.add_index(table_name, unique_index_columns, :unique => true, :name => "by_unique_dims") 
           end
           
           # puts "create_aggregate_table end"
@@ -330,12 +362,12 @@ module ActiveWarehouse #:nodoc
         target_rollup = aggregate_rollup_name(base_name, current_levels)
         new_rec_dim_class = self.new_records_only ? fact_class.dimension_class(new_records_dimension) : nil
 
-        if (self.new_records_only && !self.new_records_record && connection.tables.include?(target_rollup))
+        if (self.new_records_only && !self.new_records_record && read_connection.tables.include?(target_rollup))
           latest = nil
           new_records_field = dimension_fields[new_rec_dim_class].last
           find_latest_sql = "SELECT #{new_records_field} AS latest FROM #{target_rollup} GROUP BY #{new_records_field} ORDER BY #{new_records_field} DESC LIMIT #{[(new_records_offset - 1), 0].max}, 1"
           # puts "\n\nfind_latest_sql = #{find_latest_sql}\n\n"
-          latest = connection.select_one(find_latest_sql);
+          latest = read_connection.select_one(find_latest_sql);
           
           if latest
             # puts "found latest: #{latest.inspect}"
@@ -470,22 +502,22 @@ module ActiveWarehouse #:nodoc
         
         puts sql + "\n--------------------------------------------------------------------------------\n"
 
-        connection.transaction do
-          connection.execute(sql)
+        read_connection.transaction do
+          read_connection.execute(sql)
         end
 
-        connection.transaction do
+        write_connection.transaction do
           # TODO: remove the appropriate records
           # if new rec only, and (0) fields for the new rec dim, truncate table before loading, as this is a full load.
           if delete_sql
             puts delete_sql + "\n--------------------------------------------------------------------------------\n"
-            connection.execute(delete_sql)
+            write_connection.execute(delete_sql)
           end
           
-          # connection.bulk_load(outfile, target_rollup, options.merge({:replace=>true}))
+          # write_connection.bulk_load(outfile, target_rollup, options.merge({:replace=>true}))
           options[:columns] = load_dimension_column_names + load_aggregate_column_names
           # puts options.inspect + "\n--------------------------------------------------------------------------------\n"
-          connection.bulk_load(outfile, target_rollup, options)
+          write_connection.bulk_load(outfile, target_rollup, options)
         end
       end
 
