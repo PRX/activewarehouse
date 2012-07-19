@@ -264,10 +264,11 @@ module ActiveWarehouse #:nodoc
 
       def wait_for_replication(options={})
         return unless options[:wait_for_replication]
-        max_wait_time = 30.minutes
+        
+        max_wait_time = (options[:wait_for_replication].to_i || 1800).seconds
         end_wait = max_wait_time.since
 
-        behind = seconds_behind_master
+        behind = 1
         while (behind > 0) && (Time.now < end_wait)
           puts "PipelinedRolapAggregate: waiting for replication: behind: #{behind}"
           sleep(1)
