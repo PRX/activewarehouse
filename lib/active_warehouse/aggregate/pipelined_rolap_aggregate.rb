@@ -254,11 +254,29 @@ module ActiveWarehouse #:nodoc
         find_latest_record(base_name, dimension_fields, aggregate_levels.first, options)
         
         aggregate_levels.each do |levels|
+          wait_for_replication(options)
           create_aggregate_table(base_name, dimension_fields, levels, options)
           populate_aggregate_table(base_name, dimension_fields, levels, options)
           options.delete(:use_fact) unless options[:always_use_fact]
         end
         
+      end
+
+      def wait_for_replication(options={})
+        return unless options[:wait_for_replication]
+        max_wait_time = 30.minutes
+        end_wait = max_wait_time.since
+
+        behind = seconds_behind_master
+        while (behind > 0) && (Time.now < end_wait)
+          puts "PipelinedRolapAggregate: waiting for replication: behind: #{behind}"
+          sleep(1)
+          behind = seconds_behind_master
+        end
+      end
+
+      def seconds_behind_master(conn=read_connection)
+        conn.select_all('show slave status').first['Seconds_Behind_Master'].to_i rescue 0
       end
       
       def create_all_level?(dim, options)
