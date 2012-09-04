@@ -268,16 +268,21 @@ module ActiveWarehouse #:nodoc
         max_wait_time = (options[:wait_for_replication].to_i || 1800).seconds
         end_wait = max_wait_time.since
 
-        behind = 1
-        while (behind > 0) && (Time.now < end_wait)
+        begin
+          behind = seconds_behind_master
           puts "PipelinedRolapAggregate: waiting for replication: behind: #{behind}"
           sleep(1)
-          behind = seconds_behind_master
-        end
+        end while (behind > 0) && (Time.now < end_wait)
+        
       end
 
       def seconds_behind_master(conn=read_connection)
-        conn.select_all('show slave status').first['Seconds_Behind_Master'].to_i rescue 0
+        begin
+          conn.select_all('show slave status').first['Seconds_Behind_Master'].to_i
+        rescue Exception => exception
+          puts "PipelinedRolapAggregate: seconds_behind_master failed: #{exception.message}\n" + exception.backtrace.join("\n\t")
+          0
+        end
       end
       
       def create_all_level?(dim, options)
