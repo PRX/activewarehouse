@@ -273,12 +273,13 @@ module ActiveWarehouse #:nodoc
           puts "PipelinedRolapAggregate: waiting for replication: behind: #{behind}"
           sleep(1)
         end while (behind > 0) && (Time.now < end_wait)
-        
+
       end
 
       def seconds_behind_master(conn=read_connection)
         begin
-          conn.select_all('show slave status').first['Seconds_Behind_Master'].to_i
+          results = conn.select_all('show slave status')
+          results.size > 0 ? results.first['Seconds_Behind_Master'].to_i : 0
         rescue Exception => exception
           puts "PipelinedRolapAggregate: seconds_behind_master failed: #{exception.message}\n" + exception.backtrace.join("\n\t")
           0
@@ -389,7 +390,12 @@ module ActiveWarehouse #:nodoc
         if (self.new_records_only && !self.new_records_record && read_connection.tables.include?(target_rollup))
           latest = nil
           new_records_field = dimension_fields[new_rec_dim_class].last
-          find_latest_sql = "SELECT #{new_records_field} AS latest FROM #{target_rollup} GROUP BY #{new_records_field} ORDER BY #{new_records_field} DESC LIMIT #{[(new_records_offset - 1), 0].max}, 1"
+
+          # you may want to force using a particular start date for your cube
+          latest_value = options[:latest_record_value]
+          where_clause = latest_value ? " WHERE #{new_records_field} <= #{sanitize(latest_value)} " : ""
+
+          find_latest_sql = "SELECT #{new_records_field} AS latest FROM #{target_rollup} #{where_clause} GROUP BY #{new_records_field} ORDER BY #{new_records_field} DESC LIMIT #{[(new_records_offset - 1), 0].max}, 1"
           # puts "\n\nfind_latest_sql = #{find_latest_sql}\n\n"
           latest = read_connection.select_one(find_latest_sql);
           
@@ -429,8 +435,12 @@ module ActiveWarehouse #:nodoc
           dim, levels = pair
           max_level = current_levels[i]
 
+          # puts " -- options[:truncate]: #{options[:truncate]}"
+
           if self.new_records_only && new_rec_dim_class == dim  && !options[:truncate]
 
+            # puts " -- max_level: #{max_level}"
+            # puts " -- new_records_record: #{new_records_record.inspect}"
             if new_records_record && max_level > 0
               # puts "add in a new records only condition..."
               new_rec_fields = []
@@ -459,6 +469,7 @@ module ActiveWarehouse #:nodoc
               end
               
             else
+              # puts " -- truncate!"
               delete_sql = "TRUNCATE TABLE #{target_rollup}"
             end
           end
